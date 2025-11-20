@@ -3,8 +3,8 @@ name: Deploy to VPS
 on:
   push:
     branches:
-      - main  # Change to your deployment branch
-  workflow_dispatch:  # Allows manual triggering
+      - main
+  workflow_dispatch:
 
 env:
   REPO_NAME: ${{ github.event.repository.name }}
@@ -18,15 +18,15 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Create .env file from secrets
         run: |
           echo "${{ secrets.VPS_ENV }}" > .env
 
-      - name: Build Docker image
+      - name: Build Docker image (no cache to include correct next.config)
         run: |
-          docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
+          docker build --no-cache -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
 
       - name: Save Docker image to tar
         run: |
@@ -67,14 +67,12 @@ jobs:
           port: ${{ secrets.VPS_SSH_PORT }}
           envs: IMAGE_NAME,CONTAINER_NAME,APP_PORT,COMMIT_SHA
           script: |
-            # Load the Docker image
+            # Load Docker image
             docker load < /tmp/docker-image.tar.gz
             
-            # Define container names
             NEW_CONTAINER="${CONTAINER_NAME}-new"
             OLD_CONTAINER="${CONTAINER_NAME}"
             
-            # Start new container on temporary port
             echo "Starting new container..."
             docker run -d \
               --name $NEW_CONTAINER \
@@ -83,11 +81,9 @@ jobs:
               --restart unless-stopped \
               $IMAGE_NAME:$COMMIT_SHA
             
-            # Wait for new container to be healthy
             echo "Waiting for new container to be ready..."
             sleep 5
             
-            # Check if new container is running
             if ! docker ps | grep -q $NEW_CONTAINER; then
               echo "❌ New container failed to start"
               docker logs $NEW_CONTAINER
@@ -95,7 +91,6 @@ jobs:
               exit 1
             fi
             
-            # Health check (try to connect to the app)
             TEMP_PORT=$(docker port $NEW_CONTAINER 3000 | cut -d: -f2)
             for i in {1..10}; do
               if curl -f http://localhost:$TEMP_PORT >/dev/null 2>&1; then
@@ -112,19 +107,15 @@ jobs:
               sleep 3
             done
             
-            # Stop new container temporarily
             docker stop $NEW_CONTAINER
             
-            # Stop and remove old container (this is the quick switchover)
             echo "Switching containers..."
             docker stop $OLD_CONTAINER 2>/dev/null || true
             docker rm $OLD_CONTAINER 2>/dev/null || true
             
-            # Rename new container to production name and restart with correct port
             docker rename $NEW_CONTAINER $OLD_CONTAINER
             docker start $OLD_CONTAINER
             
-            # Update port mapping by recreating with correct port
             docker stop $OLD_CONTAINER
             docker rm $OLD_CONTAINER
             docker run -d \
@@ -134,17 +125,14 @@ jobs:
               --restart unless-stopped \
               $IMAGE_NAME:$COMMIT_SHA
             
-            # Final verification
             sleep 3
             if ! docker ps | grep -q $OLD_CONTAINER; then
               echo "❌ Final container failed to start"
               exit 1
             fi
             
-            # Remove old images for this app (keep last 3)
             docker images | grep "^$IMAGE_NAME" | tail -n +4 | awk '{print $3}' | xargs -r docker rmi 2>/dev/null || true
             
-            # Clean up
             rm /tmp/docker-image.tar.gz
             rm /tmp/.env
             
@@ -165,7 +153,6 @@ jobs:
             echo "Waiting for application to start..."
             sleep 5
             
-            # Check if container is running
             if docker ps | grep -q $CONTAINER_NAME; then
               echo "✅ Container is running"
               docker logs --tail 20 $CONTAINER_NAME
